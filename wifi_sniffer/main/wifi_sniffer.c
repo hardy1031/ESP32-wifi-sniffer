@@ -6,10 +6,24 @@
 #include "nvs_flash.h"
 
 static const char *TAG = "sniffer";
-static volatile int count = 0;            // written by the driver task, read by app_main
+static volatile int management_frame_count = 0;
+static volatile int control_frame_count = 0;
+static volatile int data_frame_count = 0;
+static volatile int other_frame_count = 0;
 
 static void my_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
-    count++;
+    if (type == WIFI_PKT_MGMT) {
+        management_frame_count++;
+    }
+    if (type == WIFI_PKT_CTRL) {
+        control_frame_count++;
+    }
+    if (type == WIFI_PKT_DATA) {
+        data_frame_count++;
+    }
+    if (type == WIFI_PKT_MISC) {
+        other_frame_count++;
+    }
 }
 
 void app_main(void) {
@@ -35,7 +49,9 @@ void app_main(void) {
   ESP_ERROR_CHECK(esp_wifi_set_promiscuous(true));
 
   while (1) {
-      ESP_LOGI(TAG, "frames: %d", count);
+      ESP_LOGI(TAG, "mgmt: %d, ctrl: %d, data: %d, other: %d",
+               management_frame_count, control_frame_count,
+               data_frame_count, other_frame_count);
       vTaskDelay(pdMS_TO_TICKS(1000));  // 1 second
   }
 }

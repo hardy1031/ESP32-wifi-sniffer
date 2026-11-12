@@ -13,7 +13,7 @@ static void my_cb(void *buf, wifi_promiscuous_pkt_type_t type) {
 }
 
 void app_main(void) {
-  // Non-Volatile Storage
+  // Non-Volatile Storage: for calibration data
   ESP_ERROR_CHECK(nvs_flash_init());
   ESP_LOGI(TAG, "nvs ok");
 

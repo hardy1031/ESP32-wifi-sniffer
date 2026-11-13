@@ -2,6 +2,7 @@
 
 ## 1. 要約
 - 構造: file header 24 B を 1 回 → その後 record（record header 16 B + frame bytes）が並ぶだけ。index も footer も無いので前から streaming できる（UART 向き）。
+- magic bytes = どの PCAP file も先頭 4 B が `0xA1B2C3D4`。「これは PCAP で、byte order はこう」と示す file signature（PNG の `89 50 4E 47`、PDF の `%PDF` と同じ仕組み）。pipe には file 名も拡張子も無いので、中身の先頭で自己紹介する。bridge.py はこれを「PCAP の開始位置」として使い、手前の boot text を捨てる。
 - file header: magic `0xA1B2C3D4`（little-endian だと `d4 c3 b2 a1` で届き、byte order も伝える）・version 2.4・reserved 0,0・snaplen・linktype 105（raw 802.11）。値は全部 spec で決まる定数。
 - record = PCAP の「1 packet 分の封筒」。frame の type（mgmt/ctrl/data）ではない。record header（PCAP: いつ・何 byte）の中に 802.11 frame（frame header: 種類・宛先）が入る。
 - record header: `ts_sec`, `ts_usec`, `incl_len`（この packet で実際に保存した byte 数）, `orig_len`（本来の長さ）。

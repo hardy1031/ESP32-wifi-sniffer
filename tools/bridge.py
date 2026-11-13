@@ -2,7 +2,7 @@
 """bridge.py: forward the ESP32's PCAP byte stream from a serial port to stdout.
 
 Usage:
-    python tools/bridge.py --port /dev/cu.usbserial-1420 --baud 1152000 | wireshark -k -i -
+    python tools/bridge.py --port /dev/cu.usbserial-1420 --baud 300000 | wireshark -k -i -
 
 What it does:
   1. Opens the serial port at the given baud rate (must match the ESP32).
@@ -79,7 +79,7 @@ def wait_for_magic(ser: serial.Serial) -> bytes:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Serial -> stdout bridge for ESP32 PCAP stream")
     ap.add_argument("--port", required=True, help="e.g. /dev/cu.usbserial-1420")
-    ap.add_argument("--baud", type=int, default=1152000, help="must match the ESP32 (default 1152000)")
+    ap.add_argument("--baud", type=int, default=300000, help="must match the ESP32 (default 300000)")
     ap.add_argument("--no-reset", action="store_true", help="don't reset the ESP32 on start")
     args = ap.parse_args()
 

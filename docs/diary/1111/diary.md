@@ -30,3 +30,20 @@ User space   app (screen / tcpdump)
    │     → returns a file descriptor         → returns a file descriptor (sockfd)
 Kernel       char-device layer → driver        network stack → interface → network driver
 Hardware     serial chip                       Wi-Fi card
+## 2026-11-11 (cont.) — promiscuous capture works; frames counted by type
+
+**やったこと:**
+1. Step A–D: `nvs_flash_init` → `esp_wifi_init` → storage RAM / mode NULL / start → rx callback + promiscuous on.
+   - Result: `frames:` climbed about 150–300/s ✅
+2. Step E: count by `type` (mgmt / ctrl / data / misc).
+   - Result: mgmt ≫ data. ctrl = 0 because the default filter passes only MGMT + DATA, so `esp_wifi_set_promiscuous_filter` is needed for CTRL.
+   - Bug fixed: copy-paste `WIFI_PKT_DATA` where `WIFI_PKT_MISC` was meant.
+3. Moved the project into the `ESP32-wifi-sniffer` repo → `idf.py fullclean` needed (build/ remembered the old path).
+
+**Decision:** stream frames over UART to the PC, not to a file on the ESP32 → `decision-capture-transport.md`
+
+**次:** G1 — send only the 24-byte PCAP file header with logs off, and open it in Wireshark.
+
+**メモ:**
+- `failed to load RF calibration data (0x1102)` = normal first boot (see `../learning/nvs-and-rf-calibration.md`).
+- `failed to post WiFi event ret=259` = no default event loop; harmless.

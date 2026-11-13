@@ -12,3 +12,5 @@ idf.py -p /dev/cu.usbserial-1420 flash monitor
 ```
 
 > python tools/bridge.py -p /dev/cu.usbserial-(usb-port number) -b 115200 > g1.bin
+
+> python tools/bridge.py --port /dev/cu.usbserial-1420 --baud 115200 | /Applications/Wireshark.app/Contents/MacOS/Wireshark -k -i -

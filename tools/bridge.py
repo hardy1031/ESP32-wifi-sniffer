@@ -16,6 +16,7 @@ All status messages go to stderr, so they never mix into the binary stream.
 """
 
 import argparse
+import os
 import sys
 import time
 
@@ -107,7 +108,11 @@ def main() -> None:
                 out.flush()          # send now, so Wireshark updates live
                 total += len(chunk)
     except BrokenPipeError:
-        log("wireshark closed the pipe; exiting")
+        log("the program reading my output (e.g. wireshark) closed the pipe; exiting")
+        # Python docs pattern: point stdout at /dev/null so the final flush at exit
+        # doesn't raise a second BrokenPipeError ("Exception ignored ...").
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
     except KeyboardInterrupt:
         log("stopped by user")
     finally:

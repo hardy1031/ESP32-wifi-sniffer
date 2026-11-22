@@ -11,7 +11,7 @@ ESP32: Wi-Fi callback → queue → uart_tx_task → UART0 (300000 baud)
 
 ```sh
 . $HOME/esp/esp-idf/export.sh
-cd wifi_sniffer
+cd ESP32-wifi-sniffer/wifi_sniffer
 idf.py build flash
 python ../tools/bridge.py --port /dev/cu.usbserial-1420 --baud 300000 \
   | /Applications/Wireshark.app/Contents/MacOS/Wireshark -k -i -
@@ -20,6 +20,39 @@ python ../tools/bridge.py --port /dev/cu.usbserial-1420 --baud 300000 \
 - `--baud` must match `PCAP_BAUD` in `wifi_sniffer/main/wifi_sniffer.c`.
 - Stop `bridge.py` (Ctrl+C) before running `idf.py flash`; both use the same serial port.
 - To save instead of viewing: `python ../tools/bridge.py --port ... --baud 300000 > cap.bin`
+- Every second `bridge.py` prints error counters to the terminal (they are not sent to Wireshark):
+  `[bridge] stats: rx_error=3 queue_dropped=120`
+  - `rx_error`: frames that arrived broken (`rx_state != 0`) and were dropped on the ESP32
+  - `queue_dropped`: frames dropped because the UART could not keep up (queue full)
+
+## What the Wi-Fi callback receives
+
+For every frame, the driver calls `my_callback` with:
+
+```
+pkt->rx_ctrl   metadata written by the ESP32 radio when it received the frame (not part of the frame)
+pkt->payload   the frame itself = [ 802.11 header | body | FCS (4 bytes) ]
+```
+
+- `rx_ctrl.sig_len`: length of `payload`, **including** the 4-byte FCS
+- `rx_ctrl.rx_state`: `0` = received OK, anything else = broken on the air
+- FCS (Frame Check Sequence) is a checksum the sender appends. The ESP32 hardware checks it on receive and writes the result to `rx_state`.
+
+Source: `wifi_pkt_rx_ctrl_t` in `$IDF_PATH/components/esp_wifi/include/local/esp_wifi_types_native.h`.
+
+## Fixed (2026-11-21): FCS and broken frames
+
+| | Problem | Wireshark symptom | Fix |
+|---|---|---|---|
+| 1 | The FCS was written into the PCAP. Wireshark assumes linktype 105 has no FCS, so it parses those 4 bytes as frame body. Affects **every** frame. | `Malformed Packet` (mostly beacons) | `orig_len = sig_len - FCS_LEN` (frames with `sig_len <= 4` are dropped) |
+| 2 | Frames with `rx_state != 0` were sent too. Their bytes are garbage and waste UART bandwidth. | `Bogus IP version` etc. | Drop them in the callback and count them in `rx_error_frames` |
+
+Counters can't be printed with `printf`: UART0 carries the PCAP, so text would corrupt the stream (and `idf.py monitor` can't share the port with `bridge.py`). Instead the ESP32 sends a **stats record** inside the stream once per second:
+
+- a normal PCAP record header with `orig_len = 0` (never true for a real frame)
+- body = `"STAT"` + `uint32 rx_error_frames` + `uint32 dropped_frames` (12 bytes, little-endian)
+
+`bridge.py` now parses the stream record by record: stats records are printed and removed, all others are forwarded. If a record header is impossible (`captured_len > snaplen`), bytes were lost on the link; `bridge.py` exits with an error instead of feeding garbage to Wireshark.
 
 ## Known issue: baud rate above 300000 breaks the stream (2026-11-13)
 

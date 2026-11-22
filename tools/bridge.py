@@ -10,13 +10,17 @@ What it does:
      it sends once at boot.
   3. Throws away boot text until it sees the PCAP magic number
      (0xA1B2C3D4, sent as D4 C3 B2 A1 by the little-endian ESP32).
-  4. From the magic onward, copies every byte to stdout unchanged.
+  4. From the magic onward, reads the stream one PCAP record at a time:
+     - normal records (802.11 frames) are copied to stdout unchanged
+     - stats records (orig_len == 0, body starts with b"STAT") are printed to
+       stderr as "stats: rx_error=N queue_dropped=N" and NOT sent to Wireshark
 
 All status messages go to stderr, so they never mix into the binary stream.
 """
 
 import argparse
 import os
+import struct
 import sys
 import time
 
@@ -27,6 +31,30 @@ except ImportError:
 
 MAGIC_LE = bytes.fromhex("d4c3b2a1")  # 0xA1B2C3D4 written by a little-endian CPU (ESP32)
 MAGIC_BE = bytes.fromhex("a1b2c3d4")  # same magic written big-endian (just in case)
+
+FILE_HEADER_LEN = 24     # pcap_file_header_t
+RECORD_HEADER_LEN = 16   # pcap_record_header_t: ts_sec, ts_usec, captured_len, orig_len
+SNAPLEN_OFFSET = 16      # where snaplen sits inside the file header
+STATS_MAGIC = b"STAT"    # stats_payload_t: "STAT", rx_error_frames, dropped_frames
+STATS_LEN = 12
+
+
+class StreamOutOfSync(Exception):
+    """A record header makes no sense: bytes were lost or corrupted on the serial link."""
+
+
+class RecordReader:
+    """Reads exact byte counts from the port, starting with bytes already read."""
+
+    def __init__(self, ser: serial.Serial, initial: bytes) -> None:
+        self._ser = ser
+        self._buf = initial
+
+    def read_exact(self, n: int) -> bytes:
+        while len(self._buf) < n:
+            self._buf += self._ser.read(4096)
+        data, self._buf = self._buf[:n], self._buf[n:]
+        return data
 
 
 def log(msg: str) -> None:
@@ -76,6 +104,37 @@ def wait_for_magic(ser: serial.Serial) -> bytes:
         buf = buf[-3:]
 
 
+def is_stats_record(orig_len: int, body: bytes) -> bool:
+    return orig_len == 0 and len(body) == STATS_LEN and body.startswith(STATS_MAGIC)
+
+
+def log_stats(body: bytes, endian: str) -> None:
+    _, rx_error, dropped = struct.unpack(f"{endian}4sII", body)
+    log(f"stats: rx_error={rx_error} queue_dropped={dropped}")
+
+
+def forward_records(reader: RecordReader, out, endian: str) -> None:
+    """Copy the file header, then every frame record, to out. Runs until an exception."""
+    file_header = reader.read_exact(FILE_HEADER_LEN)
+    (snaplen,) = struct.unpack_from(f"{endian}I", file_header, SNAPLEN_OFFSET)
+    out.write(file_header)
+    out.flush()
+
+    while True:
+        rec_header = reader.read_exact(RECORD_HEADER_LEN)
+        _, _, captured_len, orig_len = struct.unpack(f"{endian}IIII", rec_header)
+        if captured_len > snaplen:
+            raise StreamOutOfSync(f"record says {captured_len} bytes but snaplen is {snaplen}")
+        body = reader.read_exact(captured_len)
+
+        if is_stats_record(orig_len, body):
+            log_stats(body, endian)
+            continue
+
+        out.write(rec_header + body)
+        out.flush()          # send now, so Wireshark updates live
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Serial -> stdout bridge for ESP32 PCAP stream")
     ap.add_argument("--port", required=True, help="e.g. /dev/cu.usbserial-1420")
@@ -94,19 +153,15 @@ def main() -> None:
         log("ESP32 reset; waiting for PCAP header...")
 
     out = sys.stdout.buffer
-    total = 0
+    exit_code = 0
     try:
         first = wait_for_magic(ser)
-        out.write(first)
-        out.flush()
-        total += len(first)
-
-        while True:
-            chunk = ser.read(4096)
-            if chunk:
-                out.write(chunk)
-                out.flush()          # send now, so Wireshark updates live
-                total += len(chunk)
+        endian = "<" if first.startswith(MAGIC_LE) else ">"
+        forward_records(RecordReader(ser, first), out, endian)
+    except StreamOutOfSync as e:
+        log(f"error: stream out of sync ({e}); bytes were lost on the serial link. "
+            f"Try a lower --baud / PCAP_BAUD and restart.")
+        exit_code = 1
     except BrokenPipeError:
         log("the program reading my output (e.g. wireshark) closed the pipe; exiting")
         # Python docs pattern: point stdout at /dev/null so the final flush at exit
@@ -116,8 +171,8 @@ def main() -> None:
     except KeyboardInterrupt:
         log("stopped by user")
     finally:
-        log(f"forwarded {total} bytes")
         ser.close()
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

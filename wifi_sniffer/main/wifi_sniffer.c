@@ -14,9 +14,11 @@
 #include <string.h>
 
 #define PCAP_UART        UART_NUM_0
-#define PCAP_BAUD        300000   // esp32 can speeds up to 5Mbps
+#define PCAP_BAUD        200000   // esp32 can speeds up to 5Mbps
 #define CAPTURE_MAX_LEN  256      // bytes copied per frame (longer frames are truncated)
 #define QUEUE_LEN        32       // frames waiting between callback and UART task
+#define FCS_LEN          4        // payload ends with a 4-byte FCS (sig_len includes it)
+#define STATS_INTERVAL_MS 1000    // how often a stats record is sent to bridge.py
 
 // ---------- PCAP format ----------
 typedef struct {
@@ -46,8 +48,19 @@ typedef struct {
     uint8_t  data[CAPTURE_MAX_LEN];
 } captured_frame_t;
 
+// ---------- stats record: counters sent inside the PCAP stream ----------
+// Marked by orig_len == 0 (never true for a real frame). bridge.py prints it
+// to the terminal and does not forward it to Wireshark.
+typedef struct {
+    char     magic[4];          // "STAT"
+    uint32_t rx_error_frames;
+    uint32_t dropped_frames;
+} stats_payload_t;
+_Static_assert(sizeof(stats_payload_t) == 12, "stats payload must be 12 bytes");
+
 static QueueHandle_t frame_queue;
-static volatile uint32_t dropped_frames = 0;   // queue was full -> frame thrown away
+static volatile uint32_t dropped_frames = 0;    // queue was full -> frame thrown away
+static volatile uint32_t rx_error_frames = 0;   // received broken (rx_state != 0) -> thrown away
 
 // ---------- pcap functions ----------
 static void send_pcap_file_header(void) {
@@ -74,6 +87,23 @@ static void send_pcap_packet(const captured_frame_t *frame) {
     uart_write_bytes(PCAP_UART, frame->data, frame->captured_len);
 }
 
+static void send_stats_record(void) {
+    int64_t now_us = esp_timer_get_time();
+    stats_payload_t stats = {
+        .magic           = {'S', 'T', 'A', 'T'},
+        .rx_error_frames = rx_error_frames,
+        .dropped_frames  = dropped_frames,
+    };
+    pcap_record_header_t rec = {
+        .ts_sec       = (uint32_t)(now_us / 1000000),
+        .ts_usec      = (uint32_t)(now_us % 1000000),
+        .captured_len = sizeof(stats),
+        .orig_len     = 0,   // marker: not a real frame
+    };
+    uart_write_bytes(PCAP_UART, &rec, sizeof(rec));
+    uart_write_bytes(PCAP_UART, &stats, sizeof(stats));
+}
+
 // ---------- Wi-Fi callback: runs in the Wi-Fi driver task ----------
 static void my_callback(void *buf, wifi_promiscuous_pkt_type_t type) {
     if (type == WIFI_PKT_MISC) {
@@ -81,9 +111,15 @@ static void my_callback(void *buf, wifi_promiscuous_pkt_type_t type) {
     }
     const wifi_promiscuous_pkt_t *pkt = (const wifi_promiscuous_pkt_t *)buf;
 
+    // broken on air (FCS check failed etc.), or too short to even hold the FCS
+    if (pkt->rx_ctrl.rx_state != 0 || pkt->rx_ctrl.sig_len <= FCS_LEN) {
+        rx_error_frames++;
+        return;
+    }
+
     captured_frame_t frame;
     frame.ts_us        = esp_timer_get_time();
-    frame.orig_len     = pkt->rx_ctrl.sig_len;
+    frame.orig_len     = pkt->rx_ctrl.sig_len - FCS_LEN;   // drop FCS: Wireshark (linktype 105) expects none
     frame.captured_len = (frame.orig_len < CAPTURE_MAX_LEN) ? frame.orig_len : CAPTURE_MAX_LEN;
     memcpy(frame.data, pkt->payload, frame.captured_len);   // copy: buf belongs to the driver
 
@@ -93,12 +129,19 @@ static void my_callback(void *buf, wifi_promiscuous_pkt_type_t type) {
 }
 
 // ---------- UART task: takes frames from the queue and sends them ----------
+// Only this task writes to UART, so a stats record never lands inside a frame.
 static void uart_tx_task(void *arg) {
     captured_frame_t frame;
+    int64_t last_stats_us = esp_timer_get_time();
     while (1) {
-        // sleep until a frame arrives
-        if (xQueueReceive(frame_queue, &frame, portMAX_DELAY) == pdTRUE) {
+        // sleep until a frame arrives, but wake up at least once per stats interval
+        if (xQueueReceive(frame_queue, &frame, pdMS_TO_TICKS(STATS_INTERVAL_MS)) == pdTRUE) {
             send_pcap_packet(&frame);
+        }
+        int64_t now_us = esp_timer_get_time();
+        if (now_us - last_stats_us >= (int64_t)STATS_INTERVAL_MS * 1000) {
+            send_stats_record();
+            last_stats_us = now_us;
         }
     }
 }
